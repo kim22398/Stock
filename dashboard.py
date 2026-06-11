@@ -5,7 +5,8 @@
 - 의존성 없음 (파이썬 표준 라이브러리만 사용)
 - 실행:  python3 dashboard.py
 - 접속:  http://localhost:8765
-- 데이터: Yahoo Finance v8 chart API (시세 30초 / 지표용 일봉 10분 폴링)
+- 데이터: 네이버 금융 API (시세 30초 / 지표용 일봉 10분 폴링)
+  * 야후 API는 데이터센터 IP 429 차단으로 사용 불가 → 네이버로 교체
 
 지표/색상 규칙 (행 좌측 보더 + 셀 색):
   당일등락   ±3% 강조
@@ -80,32 +81,182 @@ UNIVERSE = {
 
 BENCHMARKS = {"QQQ": "나스닥100", "^KS11": "KOSPI"}
 
-# ── 데이터 수집 ───────────────────────────────────────────────────────
+# ── 데이터 수집 (네이버 금융 — 야후는 IP 차단이 잦아 교체) ──────────────
 STATE = {}
 STATE_LOCK = threading.Lock()
 LAST_QUOTE_TS = [0.0]
 
+# 미국 티커 → 네이버(로이터) 코드. NYSE=무접미사, NASDAQ=.O, 일부=.K
+NAVER_US = {
+    "GEV": "GEV", "AGX": "AGX", "BE": "BE", "STRL": "STRL.O", "MYRG": "MYRG.O",
+    "EME": "EME", "IESC": "IESC.O", "FIX": "FIX", "POWL": "POWL.O", "HUBB": "HUBB.K",
+    "NVT": "NVT", "VRT": "VRT", "MOD": "MOD", "AAON": "AAON.O", "HWM": "HWM",
+    "CRS": "CRS", "ATI": "ATI", "CLF": "CLF", "BWXT": "BWXT.K", "CCJ": "CCJ",
+    "LEU": "LEU", "OKLO": "OKLO.K", "SMR": "SMR", "PWR": "PWR", "ETN": "ETN",
+    "CEG": "CEG.O", "VST": "VST", "QQQ": "QQQ.O",
+}
+US_SYMBOLS = [s for s, v in UNIVERSE.items() if v[2] == "US"] + ["QQQ"]
+KR_SYMBOLS = [s for s, v in UNIVERSE.items() if v[2] == "KR"]
+_REV_US = {NAVER_US[s]: s for s in US_SYMBOLS}
 
-def fetch_chart(symbol, rng, interval, retries=2):
-    url = ("https://query1.finance.yahoo.com/v8/finance/chart/"
-           f"{urllib.parse.quote(symbol)}?range={rng}&interval={interval}&includePrePost=false")
+
+def _get(url, retries=2, timeout=12):
     for attempt in range(retries + 1):
         try:
             req = urllib.request.Request(url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=10) as r:
-                data = json.loads(r.read().decode())
-            res = data.get("chart", {}).get("result")
-            return res[0] if res else None
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < retries:
-                time.sleep(2 + attempt * 3)
-                continue
-            return None
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode("utf-8", "replace")
         except Exception:
             if attempt < retries:
-                time.sleep(1)
+                time.sleep(1 + attempt * 2)
+    return None
+
+
+def _num(x):
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).replace(",", "").replace("%", "").strip()
+    if not s or s in ("-", "N/A"):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _set(sym, **kw):
+    with STATE_LOCK:
+        STATE.setdefault(sym, {}).update(kw)
+
+
+def refresh_quotes():
+    """미국/한국/KOSPI 시세를 배치 3건으로 갱신."""
+    # 미국 — 배치 1건
+    got = set()
+    codes = ",".join(NAVER_US[s] for s in US_SYMBOLS)
+    body = _get(f"https://polling.finance.naver.com/api/realtime/worldstock/stock/{codes}")
+    if body:
+        try:
+            for it in json.loads(body).get("datas", []):
+                sym = _REV_US.get(it.get("reutersCode") or it.get("itemCode"))
+                if not sym:
+                    continue
+                _set(sym, price=_num(it.get("closePrice")),
+                     dayPct=_num(it.get("fluctuationsRatio")),
+                     volume=_num(it.get("accumulatedTradingVolume")),
+                     currency="USD",
+                     marketOpen=(it.get("marketStatus") == "OPEN"),
+                     stale=False)
+                got.add(sym)
+        except Exception:
+            pass
+    # 한국 — 배치 1건
+    codes = ",".join(s.split(".")[0] for s in KR_SYMBOLS)
+    body = _get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{codes}")
+    if body:
+        try:
+            for it in json.loads(body).get("datas", []):
+                code = it.get("itemCode")
+                sym = next((s for s in KR_SYMBOLS if s.split(".")[0] == code), None)
+                if not sym:
+                    continue
+                _set(sym, price=_num(it.get("closePrice")),
+                     dayPct=_num(it.get("fluctuationsRatio")),
+                     volume=_num(it.get("accumulatedTradingVolume")),
+                     currency="KRW",
+                     marketOpen=(it.get("marketStatus") == "OPEN"),
+                     stale=False)
+                got.add(sym)
+        except Exception:
+            pass
+    # KOSPI — 폴링 실패 시 일봉 마지막 2개로 폴백
+    body = _get("https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI")
+    kospi_ok = False
+    if body:
+        try:
+            datas = json.loads(body).get("datas", [])
+            if datas:
+                it = datas[0]
+                _set("^KS11", price=_num(it.get("closePrice")),
+                     dayPct=_num(it.get("fluctuationsRatio")),
+                     prevClose=None, stale=False)
+                kospi_ok = True
+        except Exception:
+            pass
+    if not kospi_ok:
+        try:
+            closes, _ = _hist_kr("KOSPI", days=10)
+            if len(closes) >= 2:
+                _set("^KS11", price=closes[-1],
+                     dayPct=(closes[-1] / closes[-2] - 1) * 100, stale=False)
+                kospi_ok = True
+        except Exception:
+            pass
+    for s in ALL_SYMBOLS:
+        if s not in got and not (s == "^KS11" and kospi_ok):
+            _set(s, stale=True)
+    LAST_QUOTE_TS[0] = time.time()
+
+
+def _date(days_ago=0):
+    t = time.localtime(time.time() - days_ago * 86400)
+    return time.strftime("%Y%m%d", t)
+
+
+def _hist_us(sym):
+    code = NAVER_US[sym]
+    url = (f"https://api.stock.naver.com/chart/foreign/item/{urllib.parse.quote(code)}"
+           f"/day?startDateTime={_date(370)}000000&endDateTime={_date(-1)}000000")
+    body = _get(url)
+    closes, vols = [], []
+    if body:
+        for row in json.loads(body):
+            c = _num(row.get("closePrice"))
+            if c is not None:
+                closes.append(c)
+                vols.append(_num(row.get("accumulatedTradingVolume")) or 0)
+    return closes, vols
+
+
+def _hist_kr(code, days=370):
+    url = (f"https://api.finance.naver.com/siseJson.naver?symbol={code}"
+           f"&requestType=1&startTime={_date(days)}&endTime={_date(-1)}&timeframe=day")
+    body = _get(url)
+    closes, vols = [], []
+    if body:
+        import ast
+        for row in ast.literal_eval(body.strip()):  # 작은따옴표 혼용이라 json 불가
+            if not isinstance(row, (list, tuple)) or len(row) < 6 or not str(row[0]).isdigit():
                 continue
-            return None
+            c = _num(row[4])
+            if c is not None:
+                closes.append(c)
+                vols.append(_num(row[5]) or 0)
+    return closes, vols
+
+
+def _hist_one(sym):
+    try:
+        if sym == "^KS11":
+            closes, vols = _hist_kr("KOSPI")
+        elif sym in NAVER_US:
+            closes, vols = _hist_us(sym)
+        else:
+            closes, vols = _hist_kr(sym.split(".")[0])
+        if closes:
+            _set(sym, rsi=rsi14(closes), sma50=sma(closes, 50), sma200=sma(closes, 200),
+                 avgVol20=(sum(vols[-21:-1]) / 20) if len(vols) >= 21 else None,
+                 hi52=max(closes), lo52=min(closes))
+    except Exception:
+        pass
+
+
+def refresh_history():
+    """일봉 기반 지표(RSI/이평/52주/평균거래량) 갱신. 6병렬."""
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        list(ex.map(_hist_one, ALL_SYMBOLS))
 
 
 def rsi14(closes, period=14):
@@ -131,76 +282,24 @@ def sma(vals, n):
     return sum(vals[-n:]) / n if len(vals) >= n else None
 
 
-def update_history(symbol):
-    res = fetch_chart(symbol, "1y", "1d")
-    if not res:
-        return
-    q = res.get("indicators", {}).get("quote", [{}])[0]
-    closes = [c for c in (q.get("close") or []) if c is not None]
-    vols = [v for v in (q.get("volume") or []) if v]
-    meta = res.get("meta", {})
-    upd = {
-        "rsi": rsi14(closes),
-        "sma50": sma(closes, 50),
-        "sma200": sma(closes, 200),
-        "avgVol20": (sum(vols[-21:-1]) / 20) if len(vols) >= 21 else None,  # 당일 제외
-        "hi52": meta.get("fiftyTwoWeekHigh") or (max(closes) if closes else None),
-        "lo52": meta.get("fiftyTwoWeekLow") or (min(closes) if closes else None),
-    }
-    with STATE_LOCK:
-        STATE.setdefault(symbol, {}).update(upd)
-
-
-def update_quote(symbol):
-    res = fetch_chart(symbol, "1d", "1d", retries=1)
-    if not res:
-        with STATE_LOCK:
-            STATE.setdefault(symbol, {})["stale"] = True
-        return
-    meta = res.get("meta", {})
-    price = meta.get("regularMarketPrice")
-    prev = meta.get("chartPreviousClose") or meta.get("previousClose")
-    vol = meta.get("regularMarketVolume")
-    if vol is None:
-        q = res.get("indicators", {}).get("quote", [{}])[0]
-        vs = [v for v in (q.get("volume") or []) if v]
-        vol = vs[-1] if vs else None
-    # 정규장 여부
-    is_open = False
-    try:
-        reg = meta["currentTradingPeriod"]["regular"]
-        is_open = reg["start"] <= time.time() <= reg["end"]
-    except Exception:
-        pass
-    upd = {
-        "price": price,
-        "prevClose": prev,
-        "dayPct": (price / prev - 1) * 100 if price and prev else None,
-        "volume": vol,
-        "currency": meta.get("currency"),
-        "marketOpen": is_open,
-        "marketTime": meta.get("regularMarketTime"),
-        "stale": False,
-    }
-    with STATE_LOCK:
-        STATE.setdefault(symbol, {}).update(upd)
-
-
-ALL_SYMBOLS = list(UNIVERSE) + list(BENCHMARKS)
+ALL_SYMBOLS = US_SYMBOLS + KR_SYMBOLS + ["^KS11"]
 
 
 def quote_loop():
     while True:
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            list(ex.map(update_quote, ALL_SYMBOLS))
-        LAST_QUOTE_TS[0] = time.time()
+        try:
+            refresh_quotes()
+        except Exception:
+            pass
         time.sleep(QUOTE_INTERVAL)
 
 
 def hist_loop():
     while True:
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            list(ex.map(update_history, ALL_SYMBOLS))
+        try:
+            refresh_history()
+        except Exception:
+            pass
         time.sleep(HIST_INTERVAL)
 
 

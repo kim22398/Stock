@@ -9,7 +9,7 @@ AI capex / 전력 인프라 테마 38종목(미국+한국) 모니터링.
 | 로컬 (실시간) | 30초 | `python3 dashboard.py` → http://localhost:8765 |
 | GitHub Pages (정적) | 장중 10분 주기 (5~15분 지연) | `docs/` Pages URL 접속 |
 
-의존성 없음 — 파이썬 표준 라이브러리만 사용. 데이터: Yahoo Finance v8 chart API (키 불필요).
+의존성 없음 — 파이썬 표준 라이브러리만 사용. 데이터: 네이버 금융 API (키 불필요. 야후 API는 IP 차단이 잦아 사용하지 않음).
 
 ## 구조
 
