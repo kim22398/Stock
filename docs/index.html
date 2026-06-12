@@ -130,6 +130,7 @@ tr.chart-row td{padding:0;background:var(--bg)}
 <div class="controls" id="viewtabs">
   <button class="chip" data-v="table">표</button>
   <button class="chip" data-v="heat">히트맵</button>
+  <button class="chip" id="fundToggle" title="dartlab 공시 기반 펀더멘털 (주 1회 갱신) — 영업이익률·부채비율·신용등급">펀더멘털</button>
 </div>
 <div class="controls" id="mktchips">
   <button class="chip on" data-m="ALL">전체</button>
@@ -152,12 +153,17 @@ tr.chart-row td{padding:0;background:var(--bg)}
   <span>행 클릭 → 캔들/RSI/거래량 차트</span>
 </div>
 <script>
-// ── 데이터 소스 자동 감지: 로컬 서버(:8765)면 /api, 아니면 Pages 정적 파일 ──
+// ── 모드 자동 감지 ──
+// BACKEND_URL: 항상 켜진 LIVE 백엔드 주소. null이면 100% 기존 동작(정적/로컬), 끊기면 자동 강등.
+const BACKEND_URL = null;  // 예: "https://your-backend.example.com"
 const LOCAL = location.port === "8765";
 const REFRESH_MS = LOCAL ? 5000 : 60000;
+let live = false;  // SSE 연결 성공 시 true
 const safeSym = s => s.replace("^", "_");
-const dataUrl = () => LOCAL ? "/api/data" : ("data.json?ts=" + Date.now());
-const histUrl = s => LOCAL ? ("/api/history/" + encodeURIComponent(s)) : ("history/" + safeSym(s) + ".json");
+const dataUrl = () => live ? (BACKEND_URL + "/snapshot")
+  : LOCAL ? "/api/data" : ("data.json?ts=" + Date.now());
+const histUrl = s => live ? (BACKEND_URL + "/history/" + safeSym(s))
+  : LOCAL ? ("/api/history/" + encodeURIComponent(s)) : ("history/" + safeSym(s) + ".json");
 
 const COLS=[
  ["name","종목"],["group","그룹"],["price","현재가"],["dayPct","등락%"],
@@ -165,7 +171,11 @@ const COLS=[
  ["vs200","200일선比"],["fper","fPER"],["growth","내재성장%"],
  ["dEarn","어닝"],["note","비고"]
 ];
-let DATA=[], sortKey=localStorage.getItem("sk")||"dayPct",
+// 펀더멘털 토글 ON 시 추가되는 칼럼 (dartlab 공시 기반)
+const FUND_COLS=[["opMargin","영업이익률"],["debtRatio","부채비율"],["creditGrade","신용등급"]];
+let FUND={}, fundMode=localStorage.getItem("fund")==="1";
+const activeCols=()=>fundMode?COLS.concat(FUND_COLS):COLS;
+let DATA=[], BENCH=[], sortKey=localStorage.getItem("sk")||"dayPct",
     sortDir=+(localStorage.getItem("sd")||-1),
     mkt=localStorage.getItem("mk")||"ALL",
     view=localStorage.getItem("vw")||"table",
@@ -222,10 +232,13 @@ function cell(k,r){
    return`<span class="${c}">${r.volX==null?"—":r.volX.toFixed(1)+"x"}</span>`;}
   case"vs200":{let c=r.vs200!=null&&r.vs200<0?"c-warn":"";
    return`<span class="${c}">${pct(r.vs200)}</span>`;}
-  case"fper":return r.fper==null?"—":r.fper.toFixed(1);
+  case"fper":{const v=r.perRel??r.fper;return v==null?"—":v.toFixed(1);}
   case"growth":return r.growth==null?"—":"+"+r.growth+"%";
   case"dEarn":return r.dEarn==null?"—":r.dEarn<=7?`<span class="tag earn">D-${r.dEarn}</span>`:"D-"+r.dEarn;
   case"note":return`<span class="note" title="${r.note||""}">${(r.note||"").replace("[추천] ","")}</span>`;
+  case"opMargin":return r.opMargin==null?"—":`<span class="${r.opMargin>=0?'up':'dn'}">${r.opMargin.toFixed(1)}%${r.opMarginDir||""}</span>`;
+  case"debtRatio":return r.debtRatio==null?"—":`<span class="${r.debtRatio>=200?'c-warn':''}">${r.debtRatio.toFixed(0)}%</span>`;
+  case"creditGrade":return r.creditGrade?`<span class="tag rec">${r.creditGrade}</span>`:"—";
  }return"";}
 
 // 시장 필터 적용된 행
@@ -341,6 +354,9 @@ function render(){
  document.querySelectorAll("#mktchips .chip").forEach(b=>{
   b.classList.toggle("on",b.dataset.m===mkt);
   b.onclick=()=>{mkt=b.dataset.m;localStorage.setItem("mk",mkt);render();};});
+ const ft=document.getElementById("fundToggle");
+ ft.classList.toggle("on",fundMode);
+ ft.onclick=()=>{fundMode=!fundMode;localStorage.setItem("fund",fundMode?"1":"0");render();};
 
  const heat=view==="heat";
  document.getElementById("heatmap").style.display=heat?"block":"none";
@@ -364,7 +380,8 @@ function render(){
  if(mobile){renderCards(rows);placeChart();return;}
 
  // 데스크톱 표
- document.getElementById("hdr").innerHTML=COLS.map(([k,l])=>
+ const cols=activeCols();
+ document.getElementById("hdr").innerHTML=cols.map(([k,l])=>
   `<th data-k="${k}">${l}${k===sortKey?`<span class="arr">${sortDir>0?" ▲":" ▼"}</span>`:""}</th>`).join("");
  document.querySelectorAll("#hdr th").forEach(th=>th.onclick=()=>{
   const k=th.dataset.k;
@@ -372,7 +389,7 @@ function render(){
   localStorage.setItem("sk",sortKey);localStorage.setItem("sd",sortDir);render();});
  document.getElementById("body").innerHTML=rows.map(r=>
   `<tr data-sym="${r.symbol}" class="${rowClass(r)} ${r.stale?"stale":""} ${r.symbol===openSym?"open":""}">`
-  +COLS.map(([k])=>`<td>${cell(k,r)}</td>`).join("")+`</tr>`).join("");
+  +cols.map(([k])=>`<td>${cell(k,r)}</td>`).join("")+`</tr>`).join("");
  document.querySelectorAll("#body tr[data-sym]").forEach(tr=>
   tr.onclick=e=>{if(e.target.closest("a"))return;toggleChart(tr.dataset.sym);});
  placeChart();
@@ -419,7 +436,7 @@ function placeChart(){
  let wrap;
  if(mobile){wrap=document.createElement("div");wrap.className="chart-card";wrap.appendChild(chartHost);}
  else{wrap=document.createElement("tr");wrap.className="chart-row";
-  const td=document.createElement("td");td.colSpan=COLS.length;td.appendChild(chartHost);wrap.appendChild(td);}
+  const td=document.createElement("td");td.colSpan=activeCols().length;td.appendChild(chartHost);wrap.appendChild(td);}
  anchor.after(wrap);  // 노드 이동 — 차트 인스턴스/줌 보존
  if(builtSym!==openSym) buildChart(openSym);
 }
@@ -487,28 +504,88 @@ async function loadHist(sym){
  const j=await res.json(); HIST_CACHE[sym]=j; return j;
 }
 
+function mergeFund(r){
+ const f=FUND[r.symbol];
+ if(f){r.opMargin=f.opMargin;r.opMarginDir=f.opMarginDir;r.debtRatio=f.debtRatio;
+  r.creditGrade=f.creditGrade;r.revenueGrowth=f.revenueGrowth;r.perRel=f.per_relative;}
+ return r;
+}
+function renderBench(){
+ document.getElementById("benchbar").innerHTML=(BENCH||[]).map(b=>{
+  const p=b.price&&b.prevClose?(b.price/b.prevClose-1)*100:b.dayPct!=null?b.dayPct:null;
+  return`<span class="bench"><span class="nm">${b.name}</span><span class="${p>0?"up":p<0?"dn":""}">${pct(p,2)}</span></span>`;
+ }).join(" ");
+}
+function updateBadges(){
+ const us=DATA.find(r=>r.market==="US"&&r.marketOpen), kr=DATA.find(r=>r.market==="KR"&&r.marketOpen);
+ document.getElementById("us-mkt").className="badge"+(us?" open":"");
+ document.getElementById("us-mkt").textContent="US "+(us?"장중":"휴장");
+ document.getElementById("kr-mkt").className="badge"+(kr?" open":"");
+ document.getElementById("kr-mkt").textContent="KR "+(kr?"장중":"휴장");
+ const mb=document.getElementById("mode-badge");
+ if(live){mb.textContent="LIVE 🔴";mb.className="badge live";mb.title="실시간 백엔드 연결됨 (SSE)";}
+ else{mb.textContent=LOCAL?"로컬 실시간":"정적 모드";mb.className="badge";}
+}
+function stamp(ts){
+ document.getElementById("updated").textContent=
+  ts?(live?"LIVE ":LOCAL?"갱신 ":"데이터 기준 ")+new Date(ts).toLocaleString("ko-KR"):"수집 중…";
+}
+
 async function refresh(){
  try{
   const d=await(await fetch(dataUrl(),{cache:"no-store"})).json();
-  DATA=d.rows.map(derive);
-  document.getElementById("benchbar").innerHTML=d.bench.map(b=>{
-   const p=b.price&&b.prevClose?(b.price/b.prevClose-1)*100:b.dayPct!=null?b.dayPct:null;
-   return`<span class="bench"><span class="nm">${b.name}</span><span class="${p>0?"up":p<0?"dn":""}">${pct(p,2)}</span></span>`;
-  }).join(" ");
-  const us=d.rows.find(r=>r.market==="US"&&r.marketOpen),
-        kr=d.rows.find(r=>r.market==="KR"&&r.marketOpen);
-  document.getElementById("us-mkt").className="badge"+(us?" open":"");
-  document.getElementById("us-mkt").textContent="US "+(us?"장중":"휴장");
-  document.getElementById("kr-mkt").className="badge"+(kr?" open":"");
-  document.getElementById("kr-mkt").textContent="KR "+(kr?"장중":"휴장");
-  const mb=document.getElementById("mode-badge");
-  mb.textContent=LOCAL?"로컬 실시간":"정적 모드";
-  document.getElementById("updated").textContent=
-   d.updated?(LOCAL?"갱신 ":"데이터 기준 ")+new Date(d.updated*1000).toLocaleString("ko-KR"):"수집 중…";
+  DATA=d.rows.map(derive).map(mergeFund);
+  BENCH=d.bench||[];
+  renderBench(); updateBadges();
+  stamp(d.updated?d.updated*1000:0);
   render();
- }catch(e){document.getElementById("updated").textContent=LOCAL?"서버 연결 끊김":"data.json 로드 실패 — Actions 첫 실행 전일 수 있음";}
+ }catch(e){
+  if(live){degrade();return;}
+  document.getElementById("updated").textContent=LOCAL?"서버 연결 끊김":"data.json 로드 실패 — Actions 첫 실행 전일 수 있음";
+ }
 }
-refresh();setInterval(refresh,REFRESH_MS);
+
+// ── LIVE 모드 (SSE) — BACKEND_URL 설정 시에만 동작 ──────────────────
+let es=null, staticTimer=null, retryTimer=null;
+function startStatic(){ if(staticTimer)return; refresh(); staticTimer=setInterval(refresh,REFRESH_MS); }
+function stopStatic(){ if(staticTimer){clearInterval(staticTimer);staticTimer=null;} }
+
+function applyRows(changed){
+ const bySym={}; DATA.forEach(r=>bySym[r.symbol]=r);
+ let benchChanged=false;
+ changed.forEach(c=>{
+  if(c.symbol in bySym){Object.assign(bySym[c.symbol],c);derive(bySym[c.symbol]);mergeFund(bySym[c.symbol]);}
+  else{const bi=BENCH.findIndex(b=>b.symbol===c.symbol);if(bi>=0){Object.assign(BENCH[bi],c);benchChanged=true;}}
+ });
+ if(benchChanged)renderBench();
+ updateBadges(); stamp(Date.now()); render();
+}
+
+async function connectLive(){
+ try{
+  const d=await(await fetch(BACKEND_URL+"/snapshot",{cache:"no-store"})).json();
+  live=true; stopStatic();
+  DATA=d.rows.map(derive).map(mergeFund); BENCH=d.bench||[];
+  renderBench(); updateBadges(); stamp(d.updated?d.updated*1000:Date.now()); render();
+  es=new EventSource(BACKEND_URL+"/stream");
+  es.addEventListener("rows",ev=>{try{applyRows(JSON.parse(ev.data));}catch(e){}});
+  es.onerror=()=>degrade();
+ }catch(e){ degrade(); }
+}
+function degrade(){
+ if(es){es.close();es=null;}
+ if(live){live=false;updateBadges();}
+ startStatic();  // 정적 폴링으로 강등 (에러 알림 없이 동작 지속)
+ if(BACKEND_URL&&!retryTimer) retryTimer=setTimeout(()=>{retryTimer=null;connectLive();},30000);  // 30초 백오프
+}
+
+// 펀더멘털 — 병렬, 없으면 무시 (graceful degradation)
+fetch("fundamentals.json",{cache:"no-store"})
+ .then(r=>r.ok?r.json():null)
+ .then(d=>{if(d&&d.items){FUND=d.items;DATA.forEach(mergeFund);render();}})
+ .catch(()=>{});
+
+if(BACKEND_URL) connectLive(); else startStatic();
 </script>
 </body>
 </html>
