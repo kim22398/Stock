@@ -17,6 +17,7 @@
   어닝       D-7 이내 배지 강조
 """
 
+import os
 import json
 import time
 import threading
@@ -188,7 +189,7 @@ def refresh_quotes():
             pass
     if not kospi_ok:
         try:
-            _, closes, _ = _hist_kr("KOSPI", days=10)
+            _, _, _, _, closes, _ = _hist_kr("KOSPI", days=10)
             if len(closes) >= 2:
                 _set("^KS11", price=closes[-1],
                      dayPct=(closes[-1] / closes[-2] - 1) * 100, stale=False)
@@ -211,49 +212,57 @@ def _hist_us(sym):
     url = (f"https://api.stock.naver.com/chart/foreign/item/{urllib.parse.quote(code)}"
            f"/day?startDateTime={_date(370)}000000&endDateTime={_date(-1)}000000")
     body = _get(url)
-    dates, closes, vols = [], [], []
+    dates, opens, highs, lows, closes, vols = [], [], [], [], [], []
     if body:
         for row in json.loads(body):
             c = _num(row.get("closePrice"))
             if c is not None:
                 dates.append(str(row.get("localDate", "")))
+                opens.append(_num(row.get("openPrice")) or c)
+                highs.append(_num(row.get("highPrice")) or c)
+                lows.append(_num(row.get("lowPrice")) or c)
                 closes.append(c)
                 vols.append(_num(row.get("accumulatedTradingVolume")) or 0)
-    return dates, closes, vols
+    return dates, opens, highs, lows, closes, vols
 
 
 def _hist_kr(code, days=370):
     url = (f"https://api.finance.naver.com/siseJson.naver?symbol={code}"
            f"&requestType=1&startTime={_date(days)}&endTime={_date(-1)}&timeframe=day")
     body = _get(url)
-    dates, closes, vols = [], [], []
+    dates, opens, highs, lows, closes, vols = [], [], [], [], [], []
     if body:
         import ast
         for row in ast.literal_eval(body.strip()):  # 작은따옴표 혼용이라 json 불가
+            # [날짜, 시가, 고가, 저가, 종가, 거래량, ...]
             if not isinstance(row, (list, tuple)) or len(row) < 6 or not str(row[0]).isdigit():
                 continue
             c = _num(row[4])
             if c is not None:
                 dates.append(str(row[0]))
+                opens.append(_num(row[1]) or c)
+                highs.append(_num(row[2]) or c)
+                lows.append(_num(row[3]) or c)
                 closes.append(c)
                 vols.append(_num(row[5]) or 0)
-    return dates, closes, vols
+    return dates, opens, highs, lows, closes, vols
 
 
 def _hist_one(sym):
     try:
         if sym == "^KS11":
-            dates, closes, vols = _hist_kr("KOSPI")
+            dates, opens, highs, lows, closes, vols = _hist_kr("KOSPI")
         elif sym in NAVER_US:
-            dates, closes, vols = _hist_us(sym)
+            dates, opens, highs, lows, closes, vols = _hist_us(sym)
         else:
-            dates, closes, vols = _hist_kr(sym.split(".")[0])
+            dates, opens, highs, lows, closes, vols = _hist_kr(sym.split(".")[0])
         if closes:
             _set(sym, rsi=rsi14(closes), sma50=sma(closes, 50), sma200=sma(closes, 200),
                  avgVol20=(sum(vols[-21:-1]) / 20) if len(vols) >= 21 else None,
                  hi52=max(closes), lo52=min(closes))
             with STATE_LOCK:
-                HIST_SERIES[sym] = {"dates": dates, "close": closes, "volume": vols}
+                HIST_SERIES[sym] = {"dates": dates, "open": opens, "high": highs,
+                                    "low": lows, "close": closes, "volume": vols}
     except Exception:
         pass
 
@@ -280,6 +289,9 @@ def history_series(sym):
     if not cached:
         return None
     dates = list(cached["dates"])
+    opens = list(cached.get("open") or cached["close"])
+    highs = list(cached.get("high") or cached["close"])
+    lows = list(cached.get("low") or cached["close"])
     closes = list(cached["close"])
     vols = list(cached["volume"])
     rsi_s, sma50_s, sma200_s = [], [], []
@@ -292,6 +304,9 @@ def history_series(sym):
         v = sma(win, 200)
         sma200_s.append(round(v, 2) if v is not None else None)
     return {"symbol": sym, "dates": dates,
+            "open": [round(o, 4) for o in opens],
+            "high": [round(h, 4) for h in highs],
+            "low": [round(lo, 4) for lo in lows],
             "close": [round(c, 4) for c in closes],
             "volume": [int(v) for v in vols],
             "rsi": rsi_s, "sma50": sma50_s, "sma200": sma200_s}
@@ -341,22 +356,32 @@ def hist_loop():
         time.sleep(HIST_INTERVAL)
 
 
+def _spark(sym):
+    """최근 30일 종가 — 행 내 스파크라인용 (히스토리 캐시 재사용, 추가 fetch 0회)."""
+    hs = HIST_SERIES.get(sym)
+    return [round(c, 4) for c in hs["close"][-30:]] if hs and hs.get("close") else None
+
+
 def snapshot():
     rows, bench = [], []
     with STATE_LOCK:
         for sym, (name, group, mkt, fper, growth, earn, note) in UNIVERSE.items():
             s = dict(STATE.get(sym, {}))
             s.update({"symbol": sym, "name": name, "group": group, "market": mkt,
-                      "fper": fper, "growth": growth, "earnings": earn, "note": note})
+                      "fper": fper, "growth": growth, "earnings": earn, "note": note,
+                      "spark": _spark(sym)})
             rows.append(s)
         for sym, name in BENCHMARKS.items():
             s = dict(STATE.get(sym, {}))
-            s.update({"symbol": sym, "name": name})
+            s.update({"symbol": sym, "name": name, "spark": _spark(sym)})
             bench.append(s)
     return {"updated": LAST_QUOTE_TS[0], "rows": rows, "bench": bench}
 
 
 # ── HTTP 서버 ────────────────────────────────────────────────────────
+INDEX_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "index.html")
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -377,7 +402,12 @@ class Handler(BaseHTTPRequestHandler):
             body = json.dumps(snapshot()).encode()
             ctype = "application/json; charset=utf-8"
         elif self.path == "/" or self.path.startswith("/index"):
-            body = HTML.encode()
+            # 프론트는 docs/index.html 단일 소스. 로컬/Pages가 host로 데이터소스 자동 감지.
+            try:
+                with open(INDEX_HTML, "rb") as f:
+                    body = f.read()
+            except OSError:
+                body = HTML.encode()  # 파일 없으면 내장본 폴백
             ctype = "text/html; charset=utf-8"
         else:
             self.send_response(404)

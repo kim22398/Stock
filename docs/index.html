@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>에너지 인프라 대시보드</title>
+<!-- 차트: TradingView lightweight-charts (CDN 1줄, 버전 고정, 빌드 없음) -->
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 :root{
   --bg:#0d1117; --panel:#161b22; --border:#30363d; --txt:#e6edf3; --dim:#8b949e;
@@ -22,6 +24,7 @@ header h1{font-size:15px;margin:0 8px 0 0}
 .bench .nm{color:var(--dim);font-size:11px}
 .badge{font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);color:var(--dim)}
 .badge.open{color:var(--green);border-color:var(--green)}
+.badge.live{color:var(--red);border-color:var(--red)}
 #updated{margin-left:auto;color:var(--dim);font-size:11px}
 .controls{display:flex;flex-wrap:wrap;gap:6px;padding:8px 16px}
 .chip{cursor:pointer;font-size:12px;padding:3px 10px;border-radius:12px;
@@ -33,11 +36,14 @@ th{position:sticky;top:46px;background:var(--panel);color:var(--dim);font-size:1
   cursor:pointer;user-select:none;z-index:5}
 th:hover{color:var(--txt)} th .arr{color:var(--blue)}
 td:first-child,th:first-child,td:nth-child(2),th:nth-child(2){text-align:left}
+tbody tr[data-sym]{cursor:pointer}
 tr.r-up{box-shadow:inset 3px 0 0 var(--green)}
 tr.r-dn{box-shadow:inset 3px 0 0 var(--red)}
 tr.r-vol{box-shadow:inset 3px 0 0 var(--orange)}
-tr:hover td{background:rgba(255,255,255,.03)}
+tr[data-sym]:hover td{background:rgba(255,255,255,.03)}
+tr.open td{background:rgba(88,166,255,.07)}
 .sym{color:var(--dim);font-size:11px;margin-left:5px}
+.spark{vertical-align:middle;margin-left:8px}
 .grp{font-size:11px;color:var(--dim)}
 .up{color:var(--green)} .dn{color:var(--red)}
 .c-strong-up{background:var(--green-bg);color:var(--green);font-weight:600}
@@ -52,6 +58,16 @@ tr:hover td{background:rgba(255,255,255,.03)}
 .tag.rec{background:rgba(88,166,255,.12);color:var(--blue)}
 .note{color:var(--dim);font-size:11px;max-width:260px;overflow:hidden;text-overflow:ellipsis}
 .stale{opacity:.45}
+/* 차트 패널 */
+tr.chart-row td{padding:0;background:var(--bg)}
+.chart-wrap{padding:8px 16px 14px}
+.chart-head{display:flex;gap:12px;align-items:baseline;margin-bottom:6px;color:var(--dim);font-size:11px}
+.chart-head b{color:var(--txt);font-size:13px}
+.chart-head .lg{display:inline-flex;align-items:center;gap:4px}
+.chart-head .lg i{width:14px;height:0;border-top:2px solid;display:inline-block}
+.ch-main{width:100%}
+.ch-rsi{width:100%;margin-top:2px}
+.chart-msg{padding:24px 16px;color:var(--dim);font-size:12px}
 .legend{padding:6px 16px 14px;color:var(--dim);font-size:11px}
 .legend span{margin-right:14px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
@@ -63,7 +79,7 @@ tr:hover td{background:rgba(255,255,255,.03)}
   <div id="benchbar"></div>
   <span class="badge" id="us-mkt">US</span>
   <span class="badge" id="kr-mkt">KR</span>
-  <span class="badge" title="GitHub Actions가 장중 10분 주기로 갱신 (큐 상황에 따라 5~15분 지연)">정적 모드</span>
+  <span class="badge" id="mode-badge" title="GitHub Actions가 장중 10분 주기로 갱신 (큐 상황에 따라 5~15분 지연)">정적 모드</span>
   <span id="updated">로딩 중…</span>
 </header>
 <div class="controls" id="mktchips">
@@ -81,9 +97,16 @@ tr:hover td{background:rgba(255,255,255,.03)}
   <span><span class="dot" style="background:var(--red)"></span>급락/고점-20%/200일선 이탈</span>
   <span><span class="dot" style="background:var(--orange)"></span>거래량 2배+ / RSI 70+</span>
   <span><span class="dot" style="background:var(--purple)"></span>어닝 D-7 이내</span>
-  <span>실시간(30초)이 필요하면 로컬에서 python3 dashboard.py</span>
+  <span>행 클릭 → 캔들/RSI/거래량 차트</span>
 </div>
 <script>
+// ── 데이터 소스 자동 감지: 로컬 서버(:8765)면 /api, 아니면 Pages 정적 파일 ──
+const LOCAL = location.port === "8765";
+const REFRESH_MS = LOCAL ? 5000 : 60000;
+const safeSym = s => s.replace("^", "_");
+const dataUrl = () => LOCAL ? "/api/data" : ("data.json?ts=" + Date.now());
+const histUrl = s => LOCAL ? ("/api/history/" + encodeURIComponent(s)) : ("history/" + safeSym(s) + ".json");
+
 const COLS=[
  ["name","종목"],["group","그룹"],["price","현재가"],["dayPct","등락%"],
  ["from52h","52주고점比"],["rsi","RSI"],["volX","거래량x"],
@@ -101,6 +124,15 @@ function fmtP(v,cur){if(v==null)return"—";
  return p+(cur==="KRW"?"₩":cur==="USD"?"$":"");}
 function pct(v,d=1){return v==null?"—":(v>0?"+":"")+v.toFixed(d)+"%";}
 function n1(v){return v==null?"—":v.toFixed(1);}
+
+function sparkSvg(arr){
+ if(!arr||arr.length<2)return"";
+ const w=64,h=18,min=Math.min(...arr),max=Math.max(...arr),rng=(max-min)||1;
+ const pts=arr.map((v,i)=>`${(i/(arr.length-1)*w).toFixed(1)},${(h-(v-min)/rng*h).toFixed(1)}`).join(" ");
+ const up=arr[arr.length-1]>=arr[0];
+ return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">`
+  +`<polyline points="${pts}" fill="none" stroke="${up?'var(--green)':'var(--red)'}" stroke-width="1.2"/></svg>`;
+}
 
 function derive(r){
  r.from52h=(r.price&&r.hi52)?(r.price/r.hi52-1)*100:null;
@@ -121,6 +153,7 @@ function cell(k,r){
  switch(k){
   case"name":{let t=`<b>${r.name}</b><span class="sym">${r.symbol}</span>`;
    if((r.note||"").includes("[추천]"))t+=`<span class="tag rec">추천</span>`;
+   t+=sparkSvg(r.spark);
    return t;}
   case"group":return`<span class="grp">${r.group}</span>`;
   case"price":return fmtP(r.price,r.currency);
@@ -167,15 +200,122 @@ function render(){
   if(x==null)return 1; if(y==null)return -1;
   return sortDir*(x-y);});
  document.getElementById("body").innerHTML=rows.map(r=>
-  `<tr class="${rowClass(r)} ${r.stale?"stale":""}">${COLS.map(([k])=>`<td>${cell(k,r)}</td>`).join("")}</tr>`).join("");
+  `<tr data-sym="${r.symbol}" class="${rowClass(r)} ${r.stale?"stale":""} ${r.symbol===openSym?"open":""}">`
+  +COLS.map(([k])=>`<td>${cell(k,r)}</td>`).join("")+`</tr>`).join("");
+ document.querySelectorAll("#body tr[data-sym]").forEach(tr=>
+  tr.onclick=e=>{if(e.target.closest("a"))return;toggleChart(tr.dataset.sym);});
+ placeChart();  // 열린 차트가 있으면 새 행 아래로 다시 배치 (chartHost 이동 → 차트/줌 보존)
+}
+
+// ── 차트 (lightweight-charts) ──────────────────────────────────────
+const HIST_CACHE={};
+let openSym=null, builtSym=null, chartHost=null, _destroy=()=>{};
+
+function toggleChart(sym){ if(openSym===sym) closeChart(); else openChart(sym); }
+
+function closeChart(){
+ _destroy(); _destroy=()=>{};
+ const cr=document.querySelector("#body tr.chart-row"); if(cr)cr.remove();
+ const op=document.querySelector("#body tr.open"); if(op)op.classList.remove("open");
+ openSym=null; builtSym=null;
+}
+
+function openChart(sym){
+ if(openSym&&openSym!==sym){_destroy();_destroy=()=>{};builtSym=null;}
+ openSym=sym;
+ document.querySelectorAll("#body tr.open").forEach(t=>t.classList.remove("open"));
+ const row=[...document.querySelectorAll("#body tr[data-sym]")].find(t=>t.dataset.sym===sym);
+ if(row)row.classList.add("open");
+ placeChart();
+}
+
+function placeChart(){
+ if(!openSym)return;
+ const row=[...document.querySelectorAll("#body tr[data-sym]")].find(t=>t.dataset.sym===openSym);
+ if(!row)return;  // 필터로 가려진 경우 — 차트는 메모리 유지, 다시 보이면 재배치
+ row.classList.add("open");
+ if(!chartHost){chartHost=document.createElement("div");chartHost.className="chart-wrap";}
+ let cr=document.querySelector("#body tr.chart-row");
+ if(!cr){
+  cr=document.createElement("tr");cr.className="chart-row";
+  const td=document.createElement("td");td.colSpan=COLS.length;td.appendChild(chartHost);
+  cr.appendChild(td);
+ }
+ row.after(cr);  // 노드 이동 — 차트 인스턴스/줌 상태 보존
+ if(builtSym!==openSym) buildChart(openSym);
+}
+
+async function buildChart(sym){
+ builtSym=sym;
+ chartHost.innerHTML='<div class="chart-msg">차트 로딩…</div>';
+ let h;
+ try{ h=await loadHist(sym); }
+ catch(e){ chartHost.innerHTML='<div class="chart-msg">히스토리 로드 실패 — 잠시 후 다시 시도</div>'; builtSym=null; return; }
+ if(!h){ chartHost.innerHTML='<div class="chart-msg">히스토리 미생성 — history 워크플로우 실행 필요</div>'; return; }
+ if(builtSym!==sym)return;  // 그 사이 다른 종목으로 바뀌었으면 폐기
+ chartHost.innerHTML='';
+ const nm=(DATA.find(r=>r.symbol===sym)||{}).name||sym;
+ const head=document.createElement("div");head.className="chart-head";
+ head.innerHTML=`<b>${nm}</b><span>${sym}</span>`
+  +`<span class="lg"><i style="border-color:var(--blue)"></i>SMA50</span>`
+  +`<span class="lg"><i style="border-color:var(--purple)"></i>SMA200</span>`
+  +`<span class="lg"><i style="border-color:var(--orange)"></i>RSI(14)</span>`;
+ const main=document.createElement("div");main.className="ch-main";
+ const rsiEl=document.createElement("div");rsiEl.className="ch-rsi";
+ chartHost.appendChild(head);chartHost.appendChild(main);chartHost.appendChild(rsiEl);
+
+ const LC=LightweightCharts;
+ const base={
+  layout:{background:{color:"#0d1117"},textColor:"#8b949e",fontSize:11},
+  grid:{vertLines:{color:"rgba(48,54,61,.35)"},horzLines:{color:"rgba(48,54,61,.35)"}},
+  timeScale:{borderColor:"#30363d",rightOffset:2},
+  rightPriceScale:{borderColor:"#30363d"},
+  crosshair:{mode:LC.CrosshairMode.Normal},
+  autoSize:true,
+ };
+ const mc=LC.createChart(main,{...base,height:280});
+ const rc=LC.createChart(rsiEl,{...base,height:96,timeScale:{...base.timeScale,visible:false}});
+ const t=d=>d.slice(0,4)+"-"+d.slice(4,6)+"-"+d.slice(6,8);
+
+ const candle=mc.addCandlestickSeries({upColor:"#3fb950",downColor:"#f85149",
+  borderUpColor:"#3fb950",borderDownColor:"#f85149",wickUpColor:"#3fb950",wickDownColor:"#f85149"});
+ candle.setData(h.dates.map((d,i)=>({time:t(d),open:h.open[i],high:h.high[i],low:h.low[i],close:h.close[i]})));
+ const ln=(c)=>mc.addLineSeries({color:c,lineWidth:1,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false});
+ ln("#58a6ff").setData(h.dates.map((d,i)=>({time:t(d),value:h.sma50[i]})).filter(p=>p.value!=null));
+ ln("#bc8cff").setData(h.dates.map((d,i)=>({time:t(d),value:h.sma200[i]})).filter(p=>p.value!=null));
+ const vol=mc.addHistogramSeries({priceScaleId:"vol",priceFormat:{type:"volume"},lastValueVisible:false,priceLineVisible:false});
+ mc.priceScale("vol").applyOptions({scaleMargins:{top:0.82,bottom:0}});
+ vol.setData(h.dates.map((d,i)=>({time:t(d),value:h.volume[i],
+  color:h.close[i]>=h.open[i]?"rgba(63,185,80,.45)":"rgba(248,81,73,.45)"})));
+
+ const rsi=rc.addLineSeries({color:"#d29922",lineWidth:1,priceLineVisible:false,lastValueVisible:false});
+ rsi.setData(h.dates.map((d,i)=>({time:t(d),value:h.rsi[i]})).filter(p=>p.value!=null));
+ rsi.createPriceLine({price:70,color:"rgba(248,81,73,.5)",lineWidth:1,lineStyle:2});
+ rsi.createPriceLine({price:30,color:"rgba(88,166,255,.5)",lineWidth:1,lineStyle:2});
+
+ // 시간축 동기화 (메인 ↔ RSI)
+ let syncing=false;
+ const link=(a,b)=>a.timeScale().subscribeVisibleLogicalRangeChange(r=>{
+  if(syncing||!r)return;syncing=true;b.timeScale().setVisibleLogicalRange(r);syncing=false;});
+ link(mc,rc);link(rc,mc);
+ mc.timeScale().fitContent();
+
+ _destroy=()=>{try{mc.remove();}catch(e){}try{rc.remove();}catch(e){}_destroy=()=>{};};
+}
+
+async function loadHist(sym){
+ if(sym in HIST_CACHE) return HIST_CACHE[sym];
+ const res=await fetch(histUrl(sym),{cache:"no-store"});
+ if(!res.ok){ if(res.status===404){HIST_CACHE[sym]=null;return null;} throw new Error("HTTP "+res.status); }
+ const j=await res.json(); HIST_CACHE[sym]=j; return j;
 }
 
 async function refresh(){
  try{
-  const d=await(await fetch("data.json?ts="+Date.now(),{cache:"no-store"})).json();
+  const d=await(await fetch(dataUrl(),{cache:"no-store"})).json();
   DATA=d.rows.map(derive);
   document.getElementById("benchbar").innerHTML=d.bench.map(b=>{
-   const p=b.price&&b.prevClose?(b.price/b.prevClose-1)*100:null;
+   const p=b.price&&b.prevClose?(b.price/b.prevClose-1)*100:b.dayPct!=null?b.dayPct:null;
    return`<span class="bench"><span class="nm">${b.name}</span><span class="${p>0?"up":p<0?"dn":""}">${pct(p,2)}</span></span>`;
   }).join(" ");
   const us=d.rows.find(r=>r.market==="US"&&r.marketOpen),
@@ -184,12 +324,14 @@ async function refresh(){
   document.getElementById("us-mkt").textContent="US "+(us?"장중":"휴장");
   document.getElementById("kr-mkt").className="badge"+(kr?" open":"");
   document.getElementById("kr-mkt").textContent="KR "+(kr?"장중":"휴장");
+  const mb=document.getElementById("mode-badge");
+  mb.textContent=LOCAL?"로컬 실시간":"정적 모드";
   document.getElementById("updated").textContent=
-   d.updated?"데이터 기준 "+new Date(d.updated*1000).toLocaleString("ko-KR"):"수집 전";
+   d.updated?(LOCAL?"갱신 ":"데이터 기준 ")+new Date(d.updated*1000).toLocaleString("ko-KR"):"수집 중…";
   render();
- }catch(e){document.getElementById("updated").textContent="data.json 로드 실패 — Actions 첫 실행 전일 수 있음";}
+ }catch(e){document.getElementById("updated").textContent=LOCAL?"서버 연결 끊김":"data.json 로드 실패 — Actions 첫 실행 전일 수 있음";}
 }
-refresh();setInterval(refresh,60000);
+refresh();setInterval(refresh,REFRESH_MS);
 </script>
 </body>
 </html>
