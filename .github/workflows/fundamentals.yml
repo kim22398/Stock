@@ -1,0 +1,44 @@
+name: fundamentals
+
+on:
+  schedule:
+    # 주 1회 — 토요일 03:00 UTC (공시 데이터는 분기 단위라 충분)
+    - cron: "0 3 * * 6"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# 시세(update-data)/일봉(history) 파이프라인과 완전 분리
+concurrency:
+  group: fundamentals
+  cancel-in-progress: false
+
+jobs:
+  fundamentals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30          # 첫 실행 시 HF 공시 데이터 다운로드 대비
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"  # dartlab은 Python>=3.12 필요
+      - name: Cache dartlab HF/공시 데이터
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/dartlab    # dartlab.dataDir() (Linux XDG 캐시 경로)
+          key: dartlab-data-${{ github.run_id }}
+          restore-keys: |
+            dartlab-data-
+      - name: Install dartlab (격리 의존성)
+        run: pip install dartlab
+      - name: Collect fundamentals
+        run: python fetch_fundamentals.py
+      - name: Commit fundamentals.json
+        run: |
+          git config user.name "data-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add docs/fundamentals.json
+          git diff --cached --quiet || git commit -m "fundamentals: weekly dartlab refresh"
+          git pull --rebase origin main
+          git push
