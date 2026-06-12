@@ -2,6 +2,9 @@ name: ci
 
 on:
   push:
+    # 데이터 봇(docs/*) 커밋엔 CI 불필요 — 코드 변경만 검사
+    paths-ignore:
+      - "docs/**"
   pull_request:
 
 permissions:
