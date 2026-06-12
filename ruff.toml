@@ -1,0 +1,11 @@
+# 관대한 설정 — 기존 코드 스타일을 강제로 바꾸지 않는다.
+# 실제 버그성(구문 오류·정의 안 된 이름·f-string 오용)만 빌드 실패로 본다.
+line-length = 200
+target-version = "py312"
+
+[lint]
+select = ["E9", "F63", "F7", "F82"]
+
+# 서버 스텁은 의도적 미구현(NotImplementedError) — 검사 제외
+[lint.per-file-ignores]
+"server/feeds/*.py" = ["F"]
