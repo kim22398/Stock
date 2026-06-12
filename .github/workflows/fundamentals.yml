@@ -30,8 +30,8 @@ jobs:
           key: dartlab-data-${{ github.run_id }}
           restore-keys: |
             dartlab-data-
-      - name: Install dartlab (격리 의존성)
-        run: pip install dartlab
+      - name: Install dartlab (격리 의존성, 버전 고정)
+        run: pip install "dartlab==0.10.6"   # 공급망: 검증된 버전 고정 (contents:write 권한 작업)
       - name: Collect fundamentals
         run: python fetch_fundamentals.py
       - name: Commit fundamentals.json

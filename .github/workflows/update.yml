@@ -25,15 +25,25 @@ jobs:
           python-version: "3.12"
       - name: Fetch quotes
         run: python fetch_data.py
-      - name: Telegram alerts (신규 트리거만)
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python notify.py     # HEAD(직전 커밋) vs 새 data.json 비교 — 커밋 전에 실행
-      - name: Commit data.json
+      - name: Commit & push data.json
+        id: commit
         run: |
           git config user.name "data-bot"
           git config user.email "actions@users.noreply.github.com"
           git add docs/data.json
-          git diff --cached --quiet || git commit -m "data: $(date -u +'%Y-%m-%d %H:%M') UTC"
-          git push
+          if git diff --cached --quiet; then
+            echo "committed=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git commit -m "data: $(date -u +'%Y-%m-%d %H:%M') UTC"
+          # 비-fast-forward 거부 대비 — rebase 후 재시도 (데이터 봇/히스토리 커밋과의 경합)
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push && { echo "committed=true" >> "$GITHUB_OUTPUT"; exit 0; }
+            echo "push attempt $i 실패 — 재시도"; sleep 3
+          done
+          echo "push 3회 실패"; exit 1
+      - name: Telegram alerts (신규 트리거만)
+        if: steps.commit.outputs.committed == 'true'   # 푸시 성공 시에만 — 중복 알림 방지
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python notify.py     # HEAD~1 vs HEAD(방금 푸시된 커밋) 비교

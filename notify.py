@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """트리거 신규 발생 시 텔레그램 알림 (파이썬 표준 라이브러리만 — urllib).
 
-update.yml 에서 fetch_data.py 직후, 커밋 직전에 실행한다.
-이전 커밋(HEAD)의 docs/data.json 과 방금 생성된 docs/data.json 을 비교해
-'새로 발생한' 트리거만 보낸다 (중복 방지 — 같은 상태가 유지되면 알림 0건).
+update.yml 에서 data.json 커밋·푸시가 성공한 뒤에만 실행된다 (push 실패 시 미실행 → 중복 알림 방지).
+방금 푸시된 커밋(HEAD)과 그 부모(HEAD~1)의 docs/data.json 을 비교해
+'새로 발생한' 트리거만 보낸다 (같은 상태가 유지되면 알림 0건).
 
 트리거: 당일 ±3% 신규 진입 / 거래량 20일평균 2배 신규 / RSI 70·30 크로스 / 52주 신고가.
 TELEGRAM_BOT_TOKEN · TELEGRAM_CHAT_ID (GitHub Secrets) 미설정 시 조용히 skip.
@@ -23,19 +23,24 @@ def _volx(r):
     return v / a if v and a else None
 
 
-def _load_new():
-    with open("docs/data.json", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _load_old():
-    """직전 커밋(HEAD)의 data.json. 없으면(최초 실행) None."""
+def _git_json(rev):
+    """주어진 리비전의 docs/data.json. 없으면 None."""
     try:
-        out = subprocess.run(["git", "show", "HEAD:docs/data.json"],
+        out = subprocess.run(["git", "show", f"{rev}:docs/data.json"],
                              capture_output=True, text=True, check=True)
         return json.loads(out.stdout)
     except Exception:
         return None
+
+
+def _load_new():
+    """방금 커밋된 상태 = HEAD (없으면 working tree 폴백)."""
+    return _git_json("HEAD") or json.load(open("docs/data.json", encoding="utf-8"))
+
+
+def _load_old():
+    """직전 데이터 상태 = HEAD~1. 없으면(최초 커밋) None."""
+    return _git_json("HEAD~1")
 
 
 def _by_sym(snap):
