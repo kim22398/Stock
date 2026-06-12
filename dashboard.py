@@ -379,7 +379,9 @@ def snapshot():
 
 
 # ── HTTP 서버 ────────────────────────────────────────────────────────
-INDEX_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "index.html")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+INDEX_HTML = os.path.join(_HERE, "docs", "index.html")
+FUNDAMENTALS_JSON = os.path.join(_HERE, "docs", "fundamentals.json")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -401,13 +403,26 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/data"):
             body = json.dumps(snapshot()).encode()
             ctype = "application/json; charset=utf-8"
+        elif self.path.startswith("/fundamentals.json"):
+            # 로컬 모드에서도 펀더멘털 표시 — docs/fundamentals.json 정적 서빙 (없으면 404 → 프론트가 무시)
+            try:
+                with open(FUNDAMENTALS_JSON, "rb") as f:
+                    body = f.read()
+            except OSError:
+                self.send_response(404)
+                self.end_headers()
+                return
+            ctype = "application/json; charset=utf-8"
         elif self.path == "/" or self.path.startswith("/index"):
             # 프론트는 docs/index.html 단일 소스. 로컬/Pages가 host로 데이터소스 자동 감지.
             try:
                 with open(INDEX_HTML, "rb") as f:
                     body = f.read()
             except OSError:
-                body = HTML.encode()  # 파일 없으면 내장본 폴백
+                body = ("<!doctype html><meta charset=utf-8>"
+                        "<body style='font:14px sans-serif;background:#0d1117;color:#e6edf3;padding:40px'>"
+                        "docs/index.html 을 찾을 수 없습니다 — 레포 루트에서 python3 dashboard.py 로 실행하세요."
+                        ).encode("utf-8")
             ctype = "text/html; charset=utf-8"
         else:
             self.send_response(404)
@@ -420,204 +435,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-
-HTML = r"""<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="utf-8">
-<title>에너지 인프라 대시보드</title>
-<style>
-:root{
-  --bg:#0d1117; --panel:#161b22; --border:#30363d; --txt:#e6edf3; --dim:#8b949e;
-  --green:#3fb950; --green-bg:rgba(63,185,80,.13);
-  --red:#f85149; --red-bg:rgba(248,81,73,.13);
-  --orange:#d29922; --orange-bg:rgba(210,153,34,.15);
-  --blue:#58a6ff; --purple:#bc8cff;
-}
-*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--txt);
-  font:13px/1.45 -apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif}
-header{display:flex;flex-wrap:wrap;gap:14px;align-items:center;
-  padding:10px 16px;border-bottom:1px solid var(--border);background:var(--panel);
-  position:sticky;top:0;z-index:10}
-header h1{font-size:15px;margin:0 8px 0 0}
-.bench{display:flex;gap:6px;align-items:baseline;padding:3px 10px;border:1px solid var(--border);border-radius:6px}
-.bench .nm{color:var(--dim);font-size:11px}
-.badge{font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);color:var(--dim)}
-.badge.open{color:var(--green);border-color:var(--green)}
-#updated{margin-left:auto;color:var(--dim);font-size:11px}
-.controls{display:flex;flex-wrap:wrap;gap:6px;padding:8px 16px}
-.chip{cursor:pointer;font-size:12px;padding:3px 10px;border-radius:12px;
-  border:1px solid var(--border);background:transparent;color:var(--dim)}
-.chip.on{color:var(--txt);border-color:var(--blue);background:rgba(88,166,255,.12)}
-table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
-th,td{padding:5px 9px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--border)}
-th{position:sticky;top:46px;background:var(--panel);color:var(--dim);font-size:11px;
-  cursor:pointer;user-select:none;z-index:5}
-th:hover{color:var(--txt)} th .arr{color:var(--blue)}
-td:first-child,th:first-child,td:nth-child(2),th:nth-child(2){text-align:left}
-tr.r-up{box-shadow:inset 3px 0 0 var(--green)}
-tr.r-dn{box-shadow:inset 3px 0 0 var(--red)}
-tr.r-vol{box-shadow:inset 3px 0 0 var(--orange)}
-tr:hover td{background:rgba(255,255,255,.03)}
-.sym{color:var(--dim);font-size:11px;margin-left:5px}
-.grp{font-size:11px;color:var(--dim)}
-.up{color:var(--green)} .dn{color:var(--red)}
-.c-strong-up{background:var(--green-bg);color:var(--green);font-weight:600}
-.c-strong-dn{background:var(--red-bg);color:var(--red);font-weight:600}
-.c-hot{background:var(--orange-bg);color:var(--orange);font-weight:600}
-.c-cold{color:var(--blue);font-weight:600}
-.c-near{background:var(--green-bg);color:var(--green)}
-.c-deep{background:var(--red-bg);color:var(--red)}
-.c-warn{color:var(--red)}
-.tag{display:inline-block;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px}
-.tag.earn{background:rgba(188,140,255,.15);color:var(--purple);border:1px solid var(--purple)}
-.tag.rec{background:rgba(88,166,255,.12);color:var(--blue)}
-.note{color:var(--dim);font-size:11px;max-width:260px;overflow:hidden;text-overflow:ellipsis}
-.stale{opacity:.45}
-.legend{padding:6px 16px 14px;color:var(--dim);font-size:11px}
-.legend span{margin-right:14px}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
-</style>
-</head>
-<body>
-<header>
-  <h1>⚡ 에너지 인프라</h1>
-  <div id="benchbar"></div>
-  <span class="badge" id="us-mkt">US</span>
-  <span class="badge" id="kr-mkt">KR</span>
-  <span id="updated">로딩 중…</span>
-</header>
-<div class="controls" id="mktchips">
-  <button class="chip on" data-m="ALL">전체</button>
-  <button class="chip" data-m="US">미국</button>
-  <button class="chip" data-m="KR">한국</button>
-</div>
-<div class="controls" id="grpchips"></div>
-<table id="tbl">
-  <thead><tr id="hdr"></tr></thead>
-  <tbody id="body"></tbody>
-</table>
-<div class="legend">
-  <span><span class="dot" style="background:var(--green)"></span>급등/고점권(-5% 이내)</span>
-  <span><span class="dot" style="background:var(--red)"></span>급락/고점-20%/200일선 이탈</span>
-  <span><span class="dot" style="background:var(--orange)"></span>거래량 2배+ / RSI 70+</span>
-  <span><span class="dot" style="background:var(--purple)"></span>어닝 D-7 이내</span>
-  <span>행 좌측 보더 = 당일 ±3% 또는 거래량 스파이크</span>
-</div>
-<script>
-const COLS=[
- ["name","종목"],["group","그룹"],["price","현재가"],["dayPct","등락%"],
- ["from52h","52주고점比"],["rsi","RSI"],["volX","거래량x"],
- ["vs200","200일선比"],["fper","fPER"],["growth","내재성장%"],
- ["dEarn","어닝"],["note","비고"]
-];
-let DATA=[], sortKey=localStorage.getItem("sk")||"dayPct",
-    sortDir=+(localStorage.getItem("sd")||-1),
-    mkt=localStorage.getItem("mk")||"ALL",
-    grps=new Set(JSON.parse(localStorage.getItem("gs")||"[]"));
-
-function fmtP(v,cur){if(v==null)return"—";
- const p=cur==="KRW"?v.toLocaleString("ko-KR",{maximumFractionDigits:0})
-   :v.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
- return p+(cur==="KRW"?"₩":cur==="USD"?"$":"");}
-function pct(v,d=1){return v==null?"—":(v>0?"+":"")+v.toFixed(d)+"%";}
-function n1(v){return v==null?"—":v.toFixed(1);}
-
-function derive(r){
- r.from52h=(r.price&&r.hi52)?(r.price/r.hi52-1)*100:null;
- r.vs200=(r.price&&r.sma200)?(r.price/r.sma200-1)*100:null;
- r.vs50=(r.price&&r.sma50)?(r.price/r.sma50-1)*100:null;
- r.volX=(r.volume&&r.avgVol20)?r.volume/r.avgVol20:null;
- if(r.earnings){const d=Math.ceil((new Date(r.earnings+"T00:00:00")-Date.now())/864e5);
-   r.dEarn=d>=0?d:null;}else r.dEarn=null;
- return r;}
-
-function rowClass(r){
- if(r.dayPct!=null&&r.dayPct<=-3)return"r-dn";
- if(r.dayPct!=null&&r.dayPct>=3)return"r-up";
- if(r.volX!=null&&r.volX>=2&&r.marketOpen)return"r-vol";
- return"";}
-
-function cell(k,r){
- switch(k){
-  case"name":{let t=`<b>${r.name}</b><span class="sym">${r.symbol}</span>`;
-   if((r.note||"").includes("[추천]"))t+=`<span class="tag rec">추천</span>`;
-   return t;}
-  case"group":return`<span class="grp">${r.group}</span>`;
-  case"price":return fmtP(r.price,r.currency);
-  case"dayPct":{let c=r.dayPct==null?"":r.dayPct>=3?"c-strong-up":r.dayPct<=-3?"c-strong-dn":r.dayPct>0?"up":r.dayPct<0?"dn":"";
-   return`<span class="${c}">${pct(r.dayPct,2)}</span>`;}
-  case"from52h":{let c=r.from52h==null?"":r.from52h>=-5?"c-near":r.from52h<=-20?"c-deep":"";
-   return`<span class="${c}">${pct(r.from52h)}</span>`;}
-  case"rsi":{let c=r.rsi==null?"":r.rsi>=70?"c-hot":r.rsi<=30?"c-cold":"";
-   return`<span class="${c}">${n1(r.rsi)}</span>`;}
-  case"volX":{let c=r.volX!=null&&r.volX>=3?"c-strong-up":r.volX!=null&&r.volX>=2?"c-hot":"";
-   return`<span class="${c}">${r.volX==null?"—":r.volX.toFixed(1)+"x"}</span>`;}
-  case"vs200":{let c=r.vs200!=null&&r.vs200<0?"c-warn":"";
-   return`<span class="${c}">${pct(r.vs200)}</span>`;}
-  case"fper":return r.fper==null?"—":r.fper.toFixed(1);
-  case"growth":return r.growth==null?"—":"+"+r.growth+"%";
-  case"dEarn":return r.dEarn==null?"—":r.dEarn<=7?`<span class="tag earn">D-${r.dEarn}</span>`:"D-"+r.dEarn;
-  case"note":return`<span class="note" title="${r.note||""}">${(r.note||"").replace("[추천] ","")}</span>`;
- }return"";}
-
-function render(){
- // 헤더
- document.getElementById("hdr").innerHTML=COLS.map(([k,l])=>
-  `<th data-k="${k}">${l}${k===sortKey?`<span class="arr">${sortDir>0?" ▲":" ▼"}</span>`:""}</th>`).join("");
- document.querySelectorAll("#hdr th").forEach(th=>th.onclick=()=>{
-  const k=th.dataset.k;
-  if(k===sortKey)sortDir*=-1;else{sortKey=k;sortDir=-1;}
-  localStorage.setItem("sk",sortKey);localStorage.setItem("sd",sortDir);render();});
- // 그룹칩
- const allG=[...new Set(DATA.map(r=>r.group))];
- document.getElementById("grpchips").innerHTML=allG.map(g=>
-  `<button class="chip ${grps.size===0||grps.has(g)?"on":""}" data-g="${g}">${g}</button>`).join("");
- document.querySelectorAll("#grpchips .chip").forEach(b=>b.onclick=()=>{
-  const g=b.dataset.g;
-  if(grps.size===0){grps=new Set([g]);}
-  else if(grps.has(g)){grps.delete(g);}
-  else grps.add(g);
-  if(grps.size===allG.length)grps.clear();
-  localStorage.setItem("gs",JSON.stringify([...grps]));render();});
- document.querySelectorAll("#mktchips .chip").forEach(b=>{
-  b.classList.toggle("on",b.dataset.m===mkt);
-  b.onclick=()=>{mkt=b.dataset.m;localStorage.setItem("mk",mkt);render();};});
- // 정렬+필터
- let rows=DATA.filter(r=>(mkt==="ALL"||r.market===mkt)&&(grps.size===0||grps.has(r.group)));
- rows.sort((a,b)=>{
-  let x=a[sortKey],y=b[sortKey];
-  if(typeof x==="string")return sortDir*String(x).localeCompare(String(y),"ko");
-  if(x==null)return 1; if(y==null)return -1;
-  return sortDir*(x-y);});
- document.getElementById("body").innerHTML=rows.map(r=>
-  `<tr class="${rowClass(r)} ${r.stale?"stale":""}">${COLS.map(([k])=>`<td>${cell(k,r)}</td>`).join("")}</tr>`).join("");
-}
-
-async function refresh(){
- try{
-  const d=await(await fetch("/api/data")).json();
-  DATA=d.rows.map(derive);
-  // 벤치마크 바
-  document.getElementById("benchbar").innerHTML=d.bench.map(b=>{
-   const p=b.price&&b.prevClose?(b.price/b.prevClose-1)*100:null;
-   return`<span class="bench"><span class="nm">${b.name}</span><span class="${p>0?"up":p<0?"dn":""}">${pct(p,2)}</span></span>`;
-  }).join(" ");
-  const us=d.rows.find(r=>r.market==="US"&&r.marketOpen),
-        kr=d.rows.find(r=>r.market==="KR"&&r.marketOpen);
-  document.getElementById("us-mkt").className="badge"+(us?" open":"");
-  document.getElementById("us-mkt").textContent="US "+(us?"장중":"휴장");
-  document.getElementById("kr-mkt").className="badge"+(kr?" open":"");
-  document.getElementById("kr-mkt").textContent="KR "+(kr?"장중":"휴장");
-  document.getElementById("updated").textContent=
-   d.updated?"갱신 "+new Date(d.updated*1000).toLocaleTimeString("ko-KR"):"수집 중…";
-  render();
- }catch(e){document.getElementById("updated").textContent="서버 연결 끊김";}
-}
-refresh();setInterval(refresh,5000);
-</script>
-</body>
-</html>"""
 
 
 def selftest():

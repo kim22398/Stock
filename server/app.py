@@ -16,7 +16,7 @@ v1 데이터 소스: 레포 루트 dashboard.py 의 refresh_quotes()/refresh_his
 import asyncio
 import os
 import sys
-import time
+from contextlib import asynccontextmanager
 
 # 레포 루트(dashboard.py)를 import 경로에 추가 — 검증된 수집 로직 재사용
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,18 +38,18 @@ ALLOW_ORIGINS = ["https://kim22398.github.io"]
 if os.environ.get("EXTRA_ORIGINS"):
     ALLOW_ORIGINS += [o.strip() for o in os.environ["EXTRA_ORIGINS"].split(",") if o.strip()]
 
-app = FastAPI(title="energy-infra LIVE backend")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOW_ORIGINS,
-    allow_methods=["GET"],
-    allow_headers=["*"],
-)
+# 공유 최신 스냅샷 — 폴러가 1회 갱신, SSE 클라이언트들은 lock 없이 읽기만 (이벤트 루프 블로킹 제거)
+_LATEST = {"snap": None}
+_TASKS = []
+
+
+def _publish():
+    _LATEST["snap"] = dashboard.snapshot()
 
 
 def _market_open():
-    with dashboard.STATE_LOCK:
-        return any(s.get("marketOpen") for s in dashboard.STATE.values())
+    snap = _LATEST["snap"]
+    return bool(snap) and any(r.get("marketOpen") for r in snap["rows"])
 
 
 async def _quote_poller():
@@ -57,6 +57,7 @@ async def _quote_poller():
     while True:
         try:
             await asyncio.to_thread(dashboard.refresh_quotes)
+            _publish()
         except Exception as e:
             print("quote poll error:", e)
         await asyncio.sleep(POLL_OPEN if _market_open() else POLL_CLOSED)
@@ -67,16 +68,31 @@ async def _hist_poller():
     while True:
         try:
             await asyncio.to_thread(dashboard.refresh_history)
+            _publish()
         except Exception as e:
             print("hist poll error:", e)
         await asyncio.sleep(HIST_INTERVAL)
 
 
-@app.on_event("startup")
-async def _startup():
-    # 첫 지표 1회 선수집 후 폴러 가동
-    asyncio.create_task(_hist_poller())
-    asyncio.create_task(_quote_poller())
+@asynccontextmanager
+async def lifespan(app):
+    _publish()  # 빈 스냅샷이라도 즉시 준비 (snapshot/stream 초기 응답)
+    _TASKS.append(asyncio.create_task(_hist_poller()))
+    _TASKS.append(asyncio.create_task(_quote_poller()))  # 참조 보관 — GC 방지
+    try:
+        yield
+    finally:
+        for t in _TASKS:
+            t.cancel()
+
+
+app = FastAPI(title="energy-infra LIVE backend", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOW_ORIGINS,
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 
 
 def _resolve_sym(sym):
@@ -87,15 +103,16 @@ def _resolve_sym(sym):
 
 
 def _sig(r):
-    """행 변경 감지용 시그니처 (시세 관련 휘발 필드)."""
+    """행 변경 감지용 시그니처 — 시세 + 일봉지표(hist refresh로만 바뀌는 필드 포함)."""
     return (r.get("price"), r.get("dayPct"), r.get("volume"),
-            r.get("marketOpen"), r.get("stale"), r.get("rsi"))
+            r.get("marketOpen"), r.get("stale"), r.get("rsi"),
+            r.get("sma50"), r.get("sma200"), r.get("hi52"), r.get("lo52"), r.get("avgVol20"))
 
 
 @app.get("/snapshot")
 async def snapshot():
     """초기 로드용 전체 스냅샷 — data.json 과 동일 스키마."""
-    return JSONResponse(dashboard.snapshot())
+    return JSONResponse(_LATEST["snap"] or dashboard.snapshot())
 
 
 @app.get("/history/{sym}")
@@ -118,23 +135,25 @@ async def stream(request: Request):
         while True:
             if await request.is_disconnected():
                 break
-            snap = dashboard.snapshot()
-            rows = snap["rows"] + snap["bench"]
-            if first:
-                # 최초 1회 전체 push (초기 정합성)
-                for r in rows:
-                    last[r["symbol"]] = _sig(r)
-                yield {"event": "rows", "data": dashboard.json.dumps(rows)}
-                first = False
-            else:
-                changed = []
-                for r in rows:
-                    sig = _sig(r)
-                    if last.get(r["symbol"]) != sig:
-                        last[r["symbol"]] = sig
-                        changed.append(r)
-                if changed:
-                    yield {"event": "rows", "data": dashboard.json.dumps(changed)}
+            snap = _LATEST["snap"]  # 공유 캐시 — lock/재계산 없이 읽기만
+            if snap:
+                rows = snap["rows"] + snap["bench"]
+                if first:
+                    for r in rows:
+                        last[r["symbol"]] = _sig(r)
+                    yield {"event": "rows",
+                           "data": dashboard.json.dumps({"updated": snap["updated"], "rows": rows})}
+                    first = False
+                else:
+                    changed = []
+                    for r in rows:
+                        sig = _sig(r)
+                        if last.get(r["symbol"]) != sig:
+                            last[r["symbol"]] = sig
+                            changed.append(r)
+                    if changed:
+                        yield {"event": "rows",
+                               "data": dashboard.json.dumps({"updated": snap["updated"], "rows": changed})}
             await asyncio.sleep(STREAM_TICK)
 
     return EventSourceResponse(gen(), ping=HEARTBEAT)
