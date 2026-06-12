@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = 8765
-QUOTE_INTERVAL = 30      # 초 — 시세 갱신
+QUOTE_INTERVAL = 7       # 초 — 시세 갱신 (네이버 공식 폴링 주기와 동일)
 HIST_INTERVAL = 600      # 초 — 일봉/지표 갱신
 HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
@@ -83,6 +83,7 @@ BENCHMARKS = {"QQQ": "나스닥100", "^KS11": "KOSPI"}
 
 # ── 데이터 수집 (네이버 금융 — 야후는 IP 차단이 잦아 교체) ──────────────
 STATE = {}
+HIST_SERIES = {}  # sym → {"dates": [...], "close": [...], "volume": [...]} (원시 일봉 캐시)
 STATE_LOCK = threading.Lock()
 LAST_QUOTE_TS = [0.0]
 
@@ -187,7 +188,7 @@ def refresh_quotes():
             pass
     if not kospi_ok:
         try:
-            closes, _ = _hist_kr("KOSPI", days=10)
+            _, closes, _ = _hist_kr("KOSPI", days=10)
             if len(closes) >= 2:
                 _set("^KS11", price=closes[-1],
                      dayPct=(closes[-1] / closes[-2] - 1) * 100, stale=False)
@@ -210,21 +211,22 @@ def _hist_us(sym):
     url = (f"https://api.stock.naver.com/chart/foreign/item/{urllib.parse.quote(code)}"
            f"/day?startDateTime={_date(370)}000000&endDateTime={_date(-1)}000000")
     body = _get(url)
-    closes, vols = [], []
+    dates, closes, vols = [], [], []
     if body:
         for row in json.loads(body):
             c = _num(row.get("closePrice"))
             if c is not None:
+                dates.append(str(row.get("localDate", "")))
                 closes.append(c)
                 vols.append(_num(row.get("accumulatedTradingVolume")) or 0)
-    return closes, vols
+    return dates, closes, vols
 
 
 def _hist_kr(code, days=370):
     url = (f"https://api.finance.naver.com/siseJson.naver?symbol={code}"
            f"&requestType=1&startTime={_date(days)}&endTime={_date(-1)}&timeframe=day")
     body = _get(url)
-    closes, vols = [], []
+    dates, closes, vols = [], [], []
     if body:
         import ast
         for row in ast.literal_eval(body.strip()):  # 작은따옴표 혼용이라 json 불가
@@ -232,23 +234,26 @@ def _hist_kr(code, days=370):
                 continue
             c = _num(row[4])
             if c is not None:
+                dates.append(str(row[0]))
                 closes.append(c)
                 vols.append(_num(row[5]) or 0)
-    return closes, vols
+    return dates, closes, vols
 
 
 def _hist_one(sym):
     try:
         if sym == "^KS11":
-            closes, vols = _hist_kr("KOSPI")
+            dates, closes, vols = _hist_kr("KOSPI")
         elif sym in NAVER_US:
-            closes, vols = _hist_us(sym)
+            dates, closes, vols = _hist_us(sym)
         else:
-            closes, vols = _hist_kr(sym.split(".")[0])
+            dates, closes, vols = _hist_kr(sym.split(".")[0])
         if closes:
             _set(sym, rsi=rsi14(closes), sma50=sma(closes, 50), sma200=sma(closes, 200),
                  avgVol20=(sum(vols[-21:-1]) / 20) if len(vols) >= 21 else None,
                  hi52=max(closes), lo52=min(closes))
+            with STATE_LOCK:
+                HIST_SERIES[sym] = {"dates": dates, "close": closes, "volume": vols}
     except Exception:
         pass
 
@@ -257,6 +262,39 @@ def refresh_history():
     """일봉 기반 지표(RSI/이평/52주/평균거래량) 갱신. 6병렬."""
     with ThreadPoolExecutor(max_workers=6) as ex:
         list(ex.map(_hist_one, ALL_SYMBOLS))
+
+
+def safe_symbol(sym):
+    """파일명 안전 치환 (^KS11 → _KS11). 프론트와 동일 규칙."""
+    return sym.replace("^", "_")
+
+
+def history_series(sym):
+    """일봉 시계열 + 파생 지표 시리즈. 전 배열 길이 동일, 워밍업 구간은 None."""
+    with STATE_LOCK:
+        cached = HIST_SERIES.get(sym)
+    if not cached:
+        _hist_one(sym)
+        with STATE_LOCK:
+            cached = HIST_SERIES.get(sym)
+    if not cached:
+        return None
+    dates = list(cached["dates"])
+    closes = list(cached["close"])
+    vols = list(cached["volume"])
+    rsi_s, sma50_s, sma200_s = [], [], []
+    for i in range(1, len(closes) + 1):
+        win = closes[:i]
+        r = rsi14(win)
+        rsi_s.append(round(r, 2) if r is not None else None)
+        v = sma(win, 50)
+        sma50_s.append(round(v, 2) if v is not None else None)
+        v = sma(win, 200)
+        sma200_s.append(round(v, 2) if v is not None else None)
+    return {"symbol": sym, "dates": dates,
+            "close": [round(c, 4) for c in closes],
+            "volume": [int(v) for v in vols],
+            "rsi": rsi_s, "sma50": sma50_s, "sma200": sma200_s}
 
 
 def rsi14(closes, period=14):
@@ -324,7 +362,18 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path.startswith("/api/data"):
+        if self.path.startswith("/api/history/"):
+            sym = urllib.parse.unquote(self.path[len("/api/history/"):].split("?")[0])
+            if sym not in ALL_SYMBOLS and sym.startswith("_") and ("^" + sym[1:]) in ALL_SYMBOLS:
+                sym = "^" + sym[1:]  # 파일명 치환 규칙(_KS11) 역변환 허용
+            data = history_series(sym) if sym in ALL_SYMBOLS else None
+            if data is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+            body = json.dumps(data).encode()
+            ctype = "application/json; charset=utf-8"
+        elif self.path.startswith("/api/data"):
             body = json.dumps(snapshot()).encode()
             ctype = "application/json; charset=utf-8"
         elif self.path == "/" or self.path.startswith("/index"):
@@ -535,7 +584,7 @@ async function refresh(){
   render();
  }catch(e){document.getElementById("updated").textContent="서버 연결 끊김";}
 }
-refresh();setInterval(refresh,15000);
+refresh();setInterval(refresh,5000);
 </script>
 </body>
 </html>"""
