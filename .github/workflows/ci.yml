@@ -28,3 +28,24 @@ jobs:
         run: ruff check .
       - name: Tests
         run: pytest -q
+      # 백엔드 import/구문 smoke — import/구문 깨짐이 green 으로 통과하지 않도록.
+      # server 만 서드파티(FastAPI 등) 의존 → server/requirements.txt 설치.
+      - name: Install backend deps
+        run: pip install -r server/requirements.txt
+      - name: Backend import smoke
+        env:
+          PYTHONPATH: .
+        run: |
+          python -c "import server.app; print('server.app OK')"
+          python -c "import notify; print('notify OK')"
+          python -c "import fetch_fundamentals; print('fetch_fundamentals OK')"
+          # fetch_data 는 top-level 에서 시세 수집(네트워크)+파일쓰기를 하는 스크립트다.
+          # 네트워크 수집/스냅샷을 스텁해 '구문/임포트'만 검증한다(데이터 가드 SystemExit 회피).
+          python -c "
+          import dashboard
+          dashboard.refresh_quotes = lambda *a, **k: None
+          dashboard.refresh_history = lambda *a, **k: None
+          dashboard.snapshot = lambda: {'updated': 0, 'rows': [{'symbol': 'X', 'price': 1.0}], 'bench': []}
+          import fetch_data
+          print('fetch_data OK')
+          "
